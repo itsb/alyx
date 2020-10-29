@@ -4,10 +4,10 @@ from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 
 from alyx.base import BaseSerializerEnumField
-from .models import (ProcedureType, Session, WaterAdministration, Weighing, WaterType,
+from .models import (ProcedureType, Session, Surgery, WaterAdministration, Weighing, WaterType,
                      WaterRestriction)
 from subjects.models import Subject, Project
-from data.models import Dataset, DatasetType
+from data.models import Dataset, DatasetType, FileRecord, DataRepository
 from misc.models import LabLocation, Lab
 from experiments.serializers import ProbeInsertionSessionSerializer
 from misc.serializers import NoteSerializer
@@ -88,6 +88,17 @@ class LabLocationSerializer(serializers.ModelSerializer):
         fields = ('name', 'lab', 'json')
 
 
+class FilterDatasetSerializer(serializers.ListSerializer):
+
+    def to_representation(self, dsets):
+        if len(DataRepository.objects.filter(globus_is_personal=False)) > 0:
+            frs = FileRecord.objects.filter(pk__in=dsets.values_list("file_records", flat=True))
+            pkd = frs.filter(exists=True, data_repository__globus_is_personal=False
+                             ).values_list("dataset", flat=True)
+            dsets = dsets.filter(pk__in=pkd)
+        return super(FilterDatasetSerializer, self).to_representation(dsets)
+
+
 class SessionDatasetsSerializer(serializers.ModelSerializer):
 
     dataset_type = serializers.SlugRelatedField(
@@ -96,6 +107,7 @@ class SessionDatasetsSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+        list_serializer_class = FilterDatasetSerializer
         model = Dataset
         fields = ('id', 'name', 'dataset_type', 'data_url', 'url', 'file_size',
                   'hash', 'version', 'collection')
@@ -251,3 +263,16 @@ class WaterAdministrationDetailSerializer(serializers.HyperlinkedModelSerializer
         fields = ('subject', 'date_time', 'water_administered', 'water_type', 'user', 'url',
                   'session', 'adlib')
         extra_kwargs = {'url': {'view_name': 'water-administration-detail'}}
+
+
+class SurgerySerializer(serializers.ModelSerializer):
+
+    subject = serializers.SlugRelatedField(
+        read_only=False,
+        slug_field='nickname',
+        queryset=Subject.objects.all()
+    )
+
+    class Meta:
+        model = Surgery
+        fields = '__all__'
