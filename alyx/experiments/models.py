@@ -1,13 +1,17 @@
+import structlog
 import uuid
 
 from django.db import models
-from django.contrib.postgres.fields import JSONField
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 
 from mptt.models import MPTTModel, TreeForeignKey
 
 from actions.models import EphysSession
-from alyx.base import BaseModel
+from alyx.base import BaseModel, BaseManager
+
+logger = structlog.get_logger(__name__)
 
 X_HELP_TEXT = ("brain surface medio-lateral coordinate (um) of"
                "the insertion, right +, relative to Bregma")
@@ -80,11 +84,18 @@ class ProbeInsertion(BaseModel):
     """
     Describe an electrophysiology probe insertion used for recording
     """
+
+    objects = BaseManager()
+
     session = models.ForeignKey(EphysSession, blank=True, null=True, on_delete=models.CASCADE,
                                 related_name='probe_insertion')
     model = models.ForeignKey(ProbeModel, blank=True, null=True, on_delete=models.SET_NULL,
                               related_name='probe_insertion')
     serial = models.CharField(max_length=255, blank=True, help_text="Probe serial number")
+
+    auto_datetime = models.DateTimeField(auto_now=True, blank=True, null=True,
+                                         verbose_name='last updated')
+    datasets = models.ManyToManyField('data.Dataset', blank=True, related_name='probe_insertion')
 
     def __str__(self):
         return "%s %s" % (self.name, str(self.session))
@@ -102,6 +113,17 @@ class ProbeInsertion(BaseModel):
     @property
     def datetime(self):
         return self.session.start_time
+
+
+@receiver(post_save, sender=ProbeInsertion)
+def update_m2m_relationships_on_save(sender, instance, **kwargs):
+    from data.models import Dataset
+    try:
+        dsets = Dataset.objects.filter(session=instance.session,
+                                       collection__endswith=instance.name)
+        instance.datasets.set(dsets, clear=True)
+    except Exception:
+        logger.warning("Skip update m2m relationship on saving ProbeInsertion")
 
 
 class TrajectoryEstimate(models.Model):
@@ -131,13 +153,14 @@ class TrajectoryEstimate(models.Model):
                             validators=[MinValueValidator(-180), MaxValueValidator(360)])
     roll = models.FloatField(null=True,
                              validators=[MinValueValidator(0), MaxValueValidator(360)])
-    provenance = models.IntegerField(default=10, choices=INSERTION_DATA_SOURCES)
+    _phelp = ' / '.join([str(s[0]) + ': ' + s[1] for s in INSERTION_DATA_SOURCES])
+    provenance = models.IntegerField(default=10, choices=INSERTION_DATA_SOURCES, help_text=_phelp)
     coordinate_system = models.ForeignKey(CoordinateSystem, null=True, blank=True,
                                           on_delete=models.SET_NULL,
-                                          help_text=('3D coordinate system used.'))
+                                          help_text='3D coordinate system used.')
     datetime = models.DateTimeField(auto_now=True, verbose_name='last update')
-    json = JSONField(null=True, blank=True,
-                     help_text="Structured data, formatted in a user-defined way")
+    json = models.JSONField(null=True, blank=True,
+                            help_text="Structured data, formatted in a user-defined way")
 
     class Meta:
         constraints = [

@@ -1,5 +1,5 @@
 import json
-import logging
+import structlog
 import os
 import os.path as op
 from polymorphic.models import PolymorphicModel
@@ -14,7 +14,6 @@ from django.db import models
 from django.db import connection
 from django.conf import settings
 from django.contrib import admin
-from django.contrib.postgres.fields import JSONField
 from django.core.mail import send_mail
 from django.core.management import call_command
 from django.template.response import TemplateResponse
@@ -29,7 +28,7 @@ from dateutil.parser import parse
 from reversion.admin import VersionAdmin
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 DATA_DIR = op.abspath(op.join(op.dirname(__file__), '../../data'))
 DISABLE_MAIL = False  # used for testing
@@ -71,8 +70,8 @@ class QueryPrintingMiddleware:
 class BaseModel(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, blank=True, help_text="Long name")
-    json = JSONField(null=True, blank=True,
-                     help_text="Structured data, formatted in a user-defined way")
+    json = models.JSONField(null=True, blank=True,
+                            help_text="Structured data, formatted in a user-defined way")
 
     class Meta:
         abstract = True
@@ -89,8 +88,8 @@ def modify_fields(**kwargs):
 
 class BasePolymorphicModel(PolymorphicModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    json = JSONField(null=True, blank=True,
-                     help_text="Structured data, formatted in a user-defined way")
+    json = models.JSONField(null=True, blank=True,
+                            help_text="Structured data, formatted in a user-defined way")
 
     class Meta:
         abstract = True
@@ -159,6 +158,8 @@ ADMIN_PAGES = [('Common', ['Subjects',
                  'Time series',
                  'Event series',
                  'Interval series',
+                 'Tags',
+                 'Revisions'
                  ]),
                ('Data that changes rarely',
                 ['Lines',
@@ -283,7 +284,7 @@ class BaseAdmin(VersionAdmin):
         models.TextField: {'widget': forms.Textarea(
                            attrs={'rows': 8,
                                   'cols': 60})},
-        JSONField: {'widget': JsonWidget},
+        models.JSONField: {'widget': JsonWidget},
         models.UUIDField: {'widget': forms.TextInput(attrs={'size': 32})},
     }
     list_per_page = 50
@@ -345,11 +346,22 @@ class BaseInlineAdmin(admin.TabularInline):
         models.TextField: {'widget': forms.Textarea(
                            attrs={'rows': 3,
                                   'cols': 30})},
-        JSONField: {'widget': forms.Textarea(
-                    attrs={'rows': 3,
-                           'cols': 30})},
+        models.JSONField: {'widget': forms.Textarea(
+            attrs={'rows': 3,
+                   'cols': 30})},
         models.CharField: {'widget': forms.TextInput(attrs={'size': 16})},
     }
+
+
+class BaseQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if "auto_datetime" in kwargs:
+            super(BaseQuerySet, self).update(**kwargs)
+        else:
+            super(BaseQuerySet, self).update(**kwargs, auto_datetime=timezone.now())
+
+
+BaseManager = models.Manager.from_queryset(BaseQuerySet)
 
 
 class BaseTests(TestCase):
@@ -479,8 +491,34 @@ def _custom_filter_parser(value, arg_prefix=''):
             val = float(val)
         elif val.startswith(('(', '[')) and val.endswith((')', ']')):
             val = eval(val)
+        if arg_prefix + field in out_dict:
+            raise(ValueError('Duplicated fields in "' + str(value) + '"'))
         out_dict[arg_prefix + field] = val
     return out_dict
+
+
+class BaseSerializerContentTypeField(serializers.SlugRelatedField):
+    """
+    Field serializer for ContentType - the internal representation is an int
+    The string representation is the concatenation of app + model, such as 'actions.session'
+    """
+
+    def to_representation(self, int_rep):
+        return int_rep.app_label + '.' + int_rep.model
+
+    def to_internal_value(self, str_rep):
+        """
+        If there is no dot, attempt a straight model lookup that may have conflicts
+        Otherwise look for 'app.model' syntax as is returned in the representation
+        A good practice is to constrain the queryset when initializing the serializer to given apps
+        to avoid conflicts on the model name as much as possible
+        """
+        if '.' in str_rep:
+            app, model = str_rep.split('.')
+            obj = self.queryset.get(model=model, app_label=app)
+        else:
+            obj = self.queryset.get(model=str_rep)
+        return obj
 
 
 class BaseSerializerEnumField(serializers.Field):

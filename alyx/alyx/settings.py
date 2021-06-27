@@ -9,6 +9,7 @@ https://docs.djangoproject.com/en/stable/ref/settings/
 """
 
 import os
+import structlog
 from django.conf.locale.en import formats as en_formats
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
@@ -59,6 +60,7 @@ AUTH_USER_MODEL = 'misc.LabMember'
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
 LOGGING = {
     'version': 1,
@@ -76,7 +78,11 @@ LOGGING = {
                 'ERROR': 'red',
                 'CRITICAL': 'bold_red',
             },
-        }
+        },
+        'json_formatter': {
+            '()': structlog.stdlib.ProcessorFormatter,
+            'processor': structlog.processors.JSONRenderer(),
+        },
     },
     'handlers': {
         'file': {
@@ -91,12 +97,22 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'simple'
         },
+        'json_file': {
+            'level': 'DEBUG',
+            'class': 'logging.handlers.WatchedFileHandler',
+            'filename': '/var/log/alyx_json.log',
+            'formatter': 'json_formatter',
+        },
     },
     'loggers': {
         'django': {
             'handlers': ['file'],
             'level': 'INFO',
             'propagate': True,
+        },
+        'django_structlog': {
+            'handlers': ['json_file'],
+            'level': 'INFO',
         }
     },
     'root': {
@@ -138,11 +154,13 @@ INSTALLED_APPS = (
     'django_admin_listfilter_dropdown',
     'django_filters',
     'django.contrib.admin',
+    'django.contrib.admindocs',
     'django.contrib.contenttypes',
     'django.contrib.auth',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_prometheus',
     'mptt',
     'polymorphic',
     'rangefilter',
@@ -158,9 +176,11 @@ INSTALLED_APPS = (
     'experiments',
     'jobs',
     'subjects',
+    'django_cleanup.apps.CleanupConfig',  # needs to be last in the list
 )
 
 MIDDLEWARE = (
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -169,6 +189,8 @@ MIDDLEWARE = (
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'alyx.base.QueryPrintingMiddleware',
+    'django_structlog.middlewares.RequestMiddleware',
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
 )
 
 ROOT_URLCONF = 'alyx.urls'
@@ -230,4 +252,25 @@ STATIC_URL = '/static/'
 
 MEDIA_ROOT = os.path.realpath(os.path.join(BASE_DIR, '../uploaded/'))
 MEDIA_URL = '/uploaded/'
+
+TABLES_ROOT = os.path.realpath(os.path.join(BASE_DIR, '../tables/'))
+
 UPLOADED_IMAGE_WIDTH = 800
+
+
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.processors.TimeStamper(fmt='iso'),
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=structlog.threadlocal.wrap_dict(dict),
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)

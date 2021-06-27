@@ -57,8 +57,7 @@ Note that the postgres username and password are distinct from Alyx (Django) use
 
 Install apache, and wsgi module, then make sure it's enabled
 
-    sudo apt-get install apache2
-    sudo apt-get install python3-pip apache2 libapache2-mod-wsgi-py3
+    sudo apt-get install apache2 libapache2-mod-wsgi-py3
     sudo a2enmod wsgi
 
 Put the [site configuration](docs/_static/001-alyx.conf) here: `/etc/apache2/sites-available/001-alyx.conf`

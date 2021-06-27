@@ -1,5 +1,5 @@
 from datetime import datetime
-import logging
+import structlog
 from operator import attrgetter
 import urllib
 
@@ -17,7 +17,7 @@ from actions.notifications import responsible_user_changed
 from actions.water_control import water_control
 from misc.models import Lab, default_lab, Housing
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # Zygosity constants
@@ -179,7 +179,7 @@ class Subject(BaseModel):
     cage = models.CharField(max_length=64, null=True, blank=True)
     request = models.ForeignKey('SubjectRequest', null=True, blank=True,
                                 on_delete=models.SET_NULL)
-    implant_weight = models.FloatField(null=True, blank=False, help_text="Implant weight in grams")
+    implant_weight = models.FloatField(null=True, blank=True, help_text="Implant weight in grams")
     ear_mark = models.CharField(max_length=32, blank=True)
     protocol_number = models.CharField(max_length=1, choices=PROTOCOL_NUMBERS,
                                        default=settings.DEFAULT_PROTOCOL)

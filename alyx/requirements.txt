@@ -1,15 +1,17 @@
-django==3.0.7
+django>=3.2.4
 coreapi
 psycopg2-binary
 drfdocs
-django-polymorphic
+django-cleanup
+django-polymorphic>=3.0.0
 djangorestframework
 django-autocomplete-light
 django-filter
-django-reversion
+django-reversion>=3.0.8
 django-test-without-migrations
 django-admin-rangefilter
 django-mptt
+docutils
 flake8
 colorlog
 django-admin-list-filter-dropdown
@@ -22,3 +24,5 @@ python-dateutil
 python-magic
 pytz
 webdavclient3
+django-prometheus
+django-structlog

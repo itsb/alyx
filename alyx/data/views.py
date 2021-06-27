@@ -1,4 +1,4 @@
-import logging
+import structlog
 import re
 from pathlib import Path
 
@@ -9,6 +9,7 @@ import django_filters
 
 from alyx.base import BaseFilterSet
 from subjects.models import Subject, Project
+from experiments.models import ProbeInsertion
 from misc.models import Lab
 from .models import (DataRepositoryType,
                      DataRepository,
@@ -18,6 +19,8 @@ from .models import (DataRepositoryType,
                      Download,
                      FileRecord,
                      new_download,
+                     Revision,
+                     Tag
                      )
 from .serializers import (DataRepositoryTypeSerializer,
                           DataRepositorySerializer,
@@ -26,11 +29,13 @@ from .serializers import (DataRepositoryTypeSerializer,
                           DatasetSerializer,
                           DownloadSerializer,
                           FileRecordSerializer,
+                          RevisionSerializer,
+                          TagSerializer
                           )
 from .transfers import (_get_session, _get_repositories_for_labs,
                         _create_dataset_file_records, bulk_sync)
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # DataRepositoryType
 # ------------------------------------------------------------------------------------------------
@@ -102,8 +107,35 @@ class DatasetTypeDetail(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = 'name'
 
 
+# Revison
+# -------------------------------------------------------------------------------------------------
+
+class RevisionList(generics.ListCreateAPIView):
+    queryset = Revision.objects.all()
+    serializer_class = RevisionSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
+
+class RevisionDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Revision.objects.all()
+    serializer_class = RevisionSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
+
+class TagList(generics.ListCreateAPIView):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
+
+class TagDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
 # Dataset
 # ------------------------------------------------------------------------------------------------
+
 
 class DatasetFilter(BaseFilterSet):
     subject = django_filters.CharFilter('session__subject__nickname')
@@ -117,16 +149,53 @@ class DatasetFilter(BaseFilterSet):
                                                      lookup_expr='gte')
     created_date_lte = django_filters.DateTimeFilter('created_datetime__date',
                                                      lookup_expr='lte')
+    exists = django_filters.BooleanFilter(method='filter_exists')
+    probe_insertion = django_filters.UUIDFilter(method='probe_insertion_filter')
+    public = django_filters.BooleanFilter(method='filter_public')
+    protected = django_filters.BooleanFilter(method='filter_protected')
+    tag = django_filters.CharFilter('tags__name')
+    revision = django_filters.CharFilter('revision__name')
 
     class Meta:
         model = Dataset
         exclude = ['json']
 
+    def filter_exists(self, dsets, name, value):
+        """
+        Filters datasets for which at least one file record Globus not personal exists.
+        Only if the database has any globus non-personal repositories (ie. servers)
+        """
+        if len(DataRepository.objects.filter(globus_is_personal=False)) > 0:
+            frs = FileRecord.objects.filter(pk__in=dsets.values_list("file_records", flat=True))
+            pkd = frs.filter(exists=value, data_repository__globus_is_personal=False
+                             ).values_list("dataset", flat=True)
+            dsets = dsets.filter(pk__in=pkd)
+        return dsets
+
+    def probe_insertion_filter(self, dsets, _, pk):
+        """
+        Filter datasets that have collection name the same as probe id
+        """
+        probe = ProbeInsertion.objects.get(pk=pk)
+        dsets = dsets.filter(session=probe.session, collection__icontains=probe.name)
+        return dsets
+
+    def filter_public(self, dsets, name, value):
+        if value:
+            return dsets.filter(tags__public=True).distinct()
+        else:
+            return dsets.exclude(tags__public=True)
+
+    def filter_protected(self, dsets, name, value):
+        if value:
+            return dsets.filter(tags__protected=True).distinct()
+        else:
+            return dsets.exclude(tags__protected=True)
+
 
 class DatasetList(generics.ListCreateAPIView):
     """
     get: **FILTERS**
-
     -   **subject**: subject nickname: `/datasets?subject=Algernon`
     -   **lab**: lab name `/datsets?lab=wittenlab`
     -   **created_date**: dataset registration date `/datasets?created_date=2020-02-16`
@@ -135,6 +204,14 @@ class DatasetList(generics.ListCreateAPIView):
     -   **experiment_number**: session number  `/datasets?experiment_number=1`
     -   **created_date_gte**: greater/equal creation date  `/datasets?created_date_gte=2020-02-16`
     -   **created_date_lte**: lower/equal creation date  `/datasets?created_date_lte=2020-02-16`
+    -   **exists**: only returns datasets for which a file record exists or doesn't exit on a
+    server repo (boolean)  `/datasets?exists=True`
+    -   **probe_insertions**: probe insertion id '/datasets?probe_insertion=uuid
+    -   **tag**: tag name '/datasets?tag=repeated_site
+    -   **public**: only returns datasets that are public or not public
+    -   **protected**: only returns datasets that are protected or not protected
+
+    [===> dataset model reference](/admin/doc/models/data.dataset)
     """
     queryset = Dataset.objects.all()
     queryset = DatasetSerializer.setup_eager_loading(queryset)
@@ -170,6 +247,8 @@ class FileRecordList(generics.ListCreateAPIView):
     -   **lab**: lab name `/files?lab=wittenlab`
     -   **data_repository**: data repository name `/files?data_repository=mainen_lab_SR`
     -   **globus_is_personal**: bool type of Globus endpoint `/files?globus_is_personal=True`
+
+    [===> file record model reference](/admin/doc/models/data.filerecord)
     """
     queryset = FileRecord.objects.all()
     queryset = FileRecordSerializer.setup_eager_loading(queryset)
@@ -214,6 +293,9 @@ def _make_dataset_response(dataset):
         'session_number': dataset.session.number,
         'session_users': ','.join(_.username for _ in dataset.session.users.all()),
         'session_start_time': dataset.session.start_time,
+        'collection': dataset.collection,
+        'revision': getattr(dataset.revision, 'name', None),
+        'default': dataset.default_dataset,
     }
     out['file_records'] = file_records
     return out
@@ -270,6 +352,10 @@ class RegisterFileViewSet(mixins.CreateModelMixin,
               # records in the server repositories and skips local repositories
               'versions': ['1.4.4', '1.4.4'],  # optional,usually refers to the software version
               # used to generate the file
+              'revisions': ['v1', 'v2'] # optional, refers to the revision of dataset. Revision
+              must be represented in folder path of filename
+              'default': False #optional , defaults to True, if more than one revision of dataset,
+              whether to set current one as the default
               }
         ```
 
@@ -284,6 +370,7 @@ class RegisterFileViewSet(mixins.CreateModelMixin,
         If the dataset already exists, it will use the file hash to deduce if the file has been
         patched or not (ie. the filerecords will be created as not existing)
         """
+        filenames = request.data.get('filenames', ())
         user = request.data.get('created_by', None)
         if user:
             user = get_user_model().objects.get(username=user)
@@ -332,6 +419,23 @@ class RegisterFileViewSet(mixins.CreateModelMixin,
         # flag to discard file records creation on local repositories, defaults to False
         server_only = request.data.get('server_only', False)
 
+        # revisions if provided
+        _revisions = request.data.get('revisions', [None for f in filenames])
+        if isinstance(_revisions, str):
+            _revisions = _revisions.split(',')
+        # Get the revision object from the revision name
+        revisions = []
+        for rev in _revisions:
+            if rev:
+                revisions.append(Revision.objects.get(name=rev))
+            else:
+                revisions.append(None)
+
+        default = request.data.get('default', True)
+        # Need to explicitly cast string to a bool
+        if default == 'False':
+            default = False
+
         # Multiple labs
         labs = request.data.get('projects', '') + request.data.get('labs', '')
         labs = labs.split(',')
@@ -347,18 +451,37 @@ class RegisterFileViewSet(mixins.CreateModelMixin,
         assert session
 
         response = []
-        for filename, hash, fsize, version in zip(filenames, hashes, filesizes, versions):
+        for filename, hash, fsize, version, revision in zip(filenames, hashes, filesizes, versions,
+                                                            revisions):
             if not filename:
                 continue
             # if filename contains path elements, interpret them as the collection field, otherwise
             # collection field is None
             collection = str(Path(filename.replace('\\', '/')).parent)
             collection = None if collection == '.' else collection
+
+            # If the revision is specified need to check that the collection path doesn't contain
+            # the revision path too
+            if revision and collection:
+                # If the last part of the collection contains the revision collection we want to
+                # remove this from the collection
+                if Path(collection).parts[-1] == revision.name:
+                    collection = str(Path(*Path(collection).parts[:-1]))
+                    # case where all of collection is the revision
+                    collection = None if collection == '.' else collection
+                else:
+                    data = {'status_code': 400,
+                            'detail': ('Revision folder ' + str(Path(collection).parts[-1]) +
+                                       ' does not equal revision name "' + revision.name + '"')}
+                    return Response(data=data, status=400)
+
             filename = Path(filename).name
-            dataset = _create_dataset_file_records(
+            dataset, resp = _create_dataset_file_records(
                 collection=collection, rel_dir_path=rel_dir_path, filename=filename,
                 session=session, user=user, repositories=repositories, exists_in=exists_in,
-                hash=hash, file_size=fsize, version=version)
+                hash=hash, file_size=fsize, version=version, revision=revision, default=default)
+            if resp:
+                return resp
             out = _make_dataset_response(dataset)
             response.append(out)
 
@@ -448,6 +571,7 @@ class DownloadList(generics.ListAPIView):
     -   **json**: icontains on json: `/downloads?json=processing`
     -   **count**: count number: `/downloads?count=5`
     -   **dataset_type**: icontains on dataset type`/downloads?dataset_type=camera`
+
     """
     queryset = Download.objects.all()
     serializer_class = DownloadSerializer

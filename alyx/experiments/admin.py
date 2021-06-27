@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.urls import reverse
+from django.utils.safestring import SafeString
 from django.utils.html import format_html
 from django.contrib.admin import TabularInline
 from reversion.admin import VersionAdmin
@@ -8,6 +9,7 @@ from mptt.admin import MPTTModelAdmin
 
 from experiments.models import (TrajectoryEstimate, ProbeInsertion, ProbeModel, CoordinateSystem,
                                 BrainRegion, Channel)
+from misc.admin import NoteInline
 from alyx.base import BaseAdmin
 
 
@@ -20,12 +22,12 @@ class TrajectoryEstimateInline(TabularInline):
 
 class ProbeInsertionInline(BaseAdmin):
     ordering = ('-session__start_time',)
-    exclude = ['session']
-    readonly_fields = ['_session']
+    exclude = ['session', 'datasets']
+    readonly_fields = ['id', '_session', 'auto_datetime', '_datasets']
     list_display = ['name', 'datetime', 'subject', 'session']
     list_display_links = ('name', 'subject', 'session',)
-    search_fields = ('session__subject__nickname',)
-    inlines = (TrajectoryEstimateInline,)
+    search_fields = ('session__subject__nickname', 'session__pk', 'id')
+    inlines = (TrajectoryEstimateInline, NoteInline)
 
     def _session(self, obj):
         # this is to provide a link back to the session page
@@ -34,6 +36,17 @@ class ProbeInsertionInline(BaseAdmin):
                       args=[obj.session.id])
         return format_html('<b><a href="{url}" ">{}</a></b>', obj.session, url=url)
     _session.short_description = 'ephys session'
+
+    def _datasets(self, obj):
+        # this is to provide a link back to the session page
+        html = ""
+        for dset in obj.datasets.all().order_by('collection', 'name'):
+            url = reverse('admin:%s_%s_change'
+                          % (dset._meta.app_label, dset._meta.model_name), args=[dset.id])
+            html += format_html('<a href="{url}" ">./{}/{}</a><br></br>',
+                                dset.collection, dset.name, url=url)
+        return SafeString(html)
+    _datasets.short_descritption = 'datasets'
 
 
 class ProbeModelAdmin(BaseAdmin):
